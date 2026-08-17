@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "julien-lite"
+version = "0.1.0"
+description = "A self-contained, portable AI agent with persistent memory backed by Ollama and LivingMemory"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "ollama",
+    "rich",
+    "duckduckgo-search",
+    "trafilatura",
+    "LivingMemory @ git+https://github.com/DarkTardigrade/LivingMemory.git@v0.2.0",
+]
+
+[tool.setuptools]
+py-modules = ["main", "tools"]

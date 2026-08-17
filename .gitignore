@@ -1,0 +1,11 @@
+# personal scratch notes
+ideas.txt
+
+# runtime SQLite memory database
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
