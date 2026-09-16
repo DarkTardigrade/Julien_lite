@@ -5,7 +5,7 @@ find bugs, and wrote most of the README and commit messages.*
 
 *Warning, this code has gone through very few testing as of this point*
 
-A self-contained, portable AI agent with persistent memory. Drop `main.py`, `tools.py`, and `txt_to_db.py` into any project, instantiate `Julien`, and it creates and manages its own SQLite memory database right beside the folder. Multiple independent instances can run in the same process without sharing memory.
+A self-contained, portable AI agent with persistent memory. Drop `Julien.py`, `tools.py`, and `txt_to_db.py` into any project, instantiate `Julien`, and it creates and manages its own SQLite memory database right beside the folder. Multiple independent instances can run in the same process without sharing memory.
 
 ---
 
@@ -46,7 +46,7 @@ pip install .
 ## Quick start
 
 ```python
-from main import Julien
+from Julien import Julien
 
 j = Julien(julienModel="qwen3:14b")
 response = j.Msg("Hello!")
@@ -66,7 +66,7 @@ Julien(
     julienModel   = "qwen3:14b",   # required — no default
     memModel      = None,          # falls back to julienModel if omitted
     contextWindow = 2048,
-    DB_PATH       = "<beside main.py>/JulienMemory.db",
+    DB_PATH       = "<beside Julien.py>/JulienMemory.db",
     timeout       = 180,
     sys_msg       = "...",
     autoTags      = [],
@@ -78,7 +78,7 @@ Julien(
 | `julienModel` | `str` | *required* | Model used for conversation |
 | `memModel` | `str` | `None` (falls back to `julienModel`) | Model used for memory compression |
 | `contextWindow` | `int` | `2048` | Token budget — must match the `num_ctx` Ollama is using |
-| `DB_PATH` | `str` | beside `main.py` | Path to the SQLite memory database |
+| `DB_PATH` | `str` | beside `Julien.py` | Path to the SQLite memory database |
 | `timeout` | `int` | `180` | Ollama client timeout in seconds |
 | `sys_msg` | `str` | built-in prompt | Julien's system prompt |
 | `autoTags` | `list` | `[]` | Memory categories to create on first run (safe to include every startup) |
@@ -175,13 +175,13 @@ Two additions to `tools.py` are required:
 1. A schema entry in the `tools` list (sent to the model)
 2. A backend function and a corresponding `elif` branch in `_Dispatch`
 
-`_Dispatch` signature: `_Dispatch(mem, table, name, args=None)`. It returns `None` for a tool that succeeded (any result is already written into `conv` inside the branch itself), or a string for a genuinely unrecognized tool name. `main.py`'s `_runTool()` is what actually decides whether a turn stops — it checks `name` directly for `"sendMsg"`/`"done"`, and also catches any exception `_Dispatch` raises (e.g. missing/malformed args) and treats that as a stop too, surfacing the error text as the turn's output instead of crashing or retrying silently.
+`_Dispatch` signature: `_Dispatch(mem, table, name, args=None)`. It returns `None` for a tool that succeeded (any result is already written into `conv` inside the branch itself), or a string for a genuinely unrecognized tool name. `Julien.py`'s `_runTool()` is what actually decides whether a turn stops — it checks `name` directly for `"sendMsg"`/`"done"`, and also catches any exception `_Dispatch` raises (e.g. missing/malformed args) and treats that as a stop too, surfacing the error text as the turn's output instead of crashing or retrying silently.
 
 ---
 
 ## Logging
 
-Uses Python's standard `logging` module under the name `"Julien"`. **Not silent by default** — `main.py` calls `logging.basicConfig(level=logging.INFO, ...)` itself at import time, so INFO-level logs go to stderr as soon as you `import main`, unless your host application configures logging (adds a handler to the root logger) first.
+Uses Python's standard `logging` module under the name `"Julien"`. **Not silent by default** — `Julien.py` calls `logging.basicConfig(level=logging.INFO, ...)` itself at import time, so INFO-level logs go to stderr as soon as you `import Julien`, unless your host application configures logging (adds a handler to the root logger) first.
 
 ```python
 # More detail during development
@@ -233,7 +233,7 @@ Julien(julienModel="qwen3-big", contextWindow=131072)
 - **Turn cap with a forced reply** — `Msg` calls `_Brain()` up to `MAX_TURNS` times; on the last one, tools are withheld so the model must answer in plain text rather than exhausting the loop with nothing to show for it.
 - **`sys_msg` always rewritten** — the system prompt is deleted and rewritten from the constructor argument on every startup, so prompt edits take effect immediately without clearing the database.
 - **Tool schema token cost is prebudgeted** — the tool list sent with every non-final-turn request has a fixed token cost, computed once as `self.tools_tok` in `__init__` and folded into every budget check in `cleanCov()`, so trimming accounts for the full request size rather than just `conv + sys_msg`.
-- **LivingMemory version is pinned, not auto-updated** — `pyproject.toml` pins an exact LivingMemory tag, and `main.py` checks the installed version against `MIN_LIVINGMEMORY_VERSION` at import time, raising a clear `ImportError` (with an upgrade command) if it's too old. To move to a newer LivingMemory, bump both the pin and `MIN_LIVINGMEMORY_VERSION` together, then `pip install --upgrade -e .`.
+- **LivingMemory version is pinned, not auto-updated** — `pyproject.toml` pins an exact LivingMemory tag, and `Julien.py` checks the installed version against `MIN_LIVINGMEMORY_VERSION` at import time, raising a clear `ImportError` (with an upgrade command) if it's too old. To move to a newer LivingMemory, bump both the pin and `MIN_LIVINGMEMORY_VERSION` together, then `pip install --upgrade -e .`.
 - **Multiple instances** — each instance gets its own `DB_PATH` and `self.TABLE = "Julien"`. Two instances sharing the same `DB_PATH` would share the same table and corrupt each other's memory; use distinct paths.
 
 ---

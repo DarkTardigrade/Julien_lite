@@ -37,8 +37,8 @@ _check_livingmemory_version()
 from LivingMemory import LivingMemory # type:ignore
 LM_log = logging.getLogger("LivingMemory") #.setLevel(logging.DEBUG)
 
-from Julien_lite.tools import tools, _Dispatch # type:ignore
-from Julien_lite.txt_to_db import _compileTXT # type:ignore
+from tools import tools, _Dispatch # type:ignore
+from txt_to_db import _compileTXT # type:ignore
 
 
 
