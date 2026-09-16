@@ -13,7 +13,7 @@ logging.basicConfig(
 logger = logging.getLogger("Julien")
 
 # --- LivingMemory version check ---
-MIN_LIVINGMEMORY_VERSION = "0.2.0"
+MIN_LIVINGMEMORY_VERSION = "0.2.1"
 
 def _check_livingmemory_version():
     try:
@@ -34,10 +34,11 @@ _check_livingmemory_version()
 
 
 # local imports
-from LivingMemory import LivingMemory  # type:ignore
-LM_log = logging.getLogger("LivingMemory")#.setLevel(logging.DEBUG)
+from LivingMemory import LivingMemory # type:ignore
+LM_log = logging.getLogger("LivingMemory") #.setLevel(logging.DEBUG)
 
-from tools import tools, _Dispatch
+from Julien_lite.tools import tools, _Dispatch # type:ignore
+from Julien_lite.txt_to_db import _compileTXT # type:ignore
 
 
 
@@ -56,7 +57,7 @@ class Julien:
 You enjoy helping progress human technology and understanding of the world,
 as well as improving your own understanding of the world.
 
-If you hear anything you think will be important to know later, use remember to store it —
+If you hear anything you think will be important to know later, use memorize to store it —
 pick an existing category, or write to a new one to create it on the fly.""",
         
         autoTags:list = []):
@@ -89,6 +90,9 @@ pick an existing category, or write to a new one to create it on the fly.""",
         self.contextWindow = contextWindow
         self.MAX_TURNS = MAX_TURNS
 
+        # tool schemas are sent with every non-final turn - compute token cost
+        self.tools_tok = self.mem._strTok(json.dumps(tools), self.model)
+
         # check sys_msg size against context budget
         sys_tok = self.mem.memTok(self.TABLE, tag="sys_msg", model=self.model)
         if sys_tok > self.contextWindow // 2:
@@ -103,6 +107,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
 
     # gets a reply from Julien baced on text input
     def Msg(self, user_msg: str) -> str:
+
 
         # add user's last message to the conversation
         self.mem.addConv(self.TABLE, "user", user_msg)
@@ -159,7 +164,27 @@ pick an existing category, or write to a new one to create it on the fly.""",
         return None
 
 
+    # builds (wipes + rebuilds) a memory DB at dbPath by distilling text sources into tags
+    def makeDBfromTXT(self, sources:list, tags:dict, table:str = "Julien", chunkSize:int = 10_000) -> None:
+        _compileTXT(self.mem, table, chunkSize,  tags, sources)
 
+
+    # merges every tag (except conv/sys_msg) from srcTable into dstTable, appending then compressing duplicates
+    def combineDB(self, srcPath: str, srcTable: str, dstPath: str, dstTable: str, model: str = None) -> None:
+        model = model or self.model
+        srcMem = LivingMemory(model=model, contextWindow=self.contextWindow, dbPath=srcPath)
+        dstMem = LivingMemory(model=model, contextWindow=self.contextWindow, dbPath=dstPath)
+
+        existing_dst_tags = dstMem.getTags(dstTable)
+        for tag in srcMem.getTags(srcTable, drop=["conv", "sys_msg"]):
+            content = srcMem.rMem(srcTable, tag)
+            if not content.strip():
+                continue
+            desc = dstMem.getDesc(dstTable, tag) if tag in existing_dst_tags else srcMem.getDesc(srcTable, tag)
+            dstMem.writeMem(dstTable, tag, desc=desc, memory=content)
+            dstMem.cleanTag(dstTable, tag)
+
+        print(f"Merged {srcPath}::{srcTable} into {dstPath}::{dstTable}")
 
 
 
@@ -174,7 +199,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
         conv_tok = self.mem.memTok(self.TABLE, tag="conv", model=self.model)
         sys_tok  = self.mem.memTok(self.TABLE, tag="sys_msg", model=self.model)
 
-        if conv_tok + sys_tok <= self.contextWindow:
+        if conv_tok + sys_tok + self.tools_tok <= self.contextWindow:
             return
 
         # tag the whole conversation up into existing tags before any of it gets trimmed away
@@ -187,7 +212,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
         for keep in (40, 30, 20, 10, 5, 2, 0):
             self.mem.deleteTag(self.TABLE, "conv", keep)
             conv_tok = self.mem.memTok(self.TABLE, tag="conv", model=self.model)
-            if conv_tok + sys_tok <= self.contextWindow:
+            if conv_tok + sys_tok + self.tools_tok <= self.contextWindow:
                 break
 
         self.mem.cleanAll(table=self.TABLE, drop=["conv", "sys_msg"], model=self.model, maxTok=self.contextWindow / 4, chopTime=9)
@@ -197,7 +222,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
     def _runTool(self, name: str, args: dict) -> str | None:
         try:
             result = _Dispatch(self.mem, self.TABLE, name, args)
-            if name == "sendUser":
+            if name == "sendMsg":
                 return args["message"]
             if name == "done":
                 return ""

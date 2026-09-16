@@ -23,14 +23,14 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "sendUser",
-            "description": "Sends a message to the user.",
+            "name": "sendMsg",
+            "description": "Sends a message whoever is around to hear it",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "message": {
                         "type": "string",
-                        "description": "The message to send to the user"
+                        "description": "Sends a message whoever is around to hear it"
                     }
                 },
                 "required": ["message"]
@@ -97,23 +97,6 @@ tools = [
     {
         "type": "function",
         "function": {
-            "name": "GoogleSearch",
-            "description": "Searches Google for more information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "done",
             "description": "Signal that you have finished this turn and have nothing more to do. Call this when your response is complete.",
             "parameters": {
@@ -128,65 +111,6 @@ tools = [
 
 
 # < - - - - - [ Tool backends ] - - - - - >
-
-import time
-_last_search_time = 0.0
-_MIN_SEARCH_DELAY = 2.0
-
-def _fetch_page(url: str, max_chars: int = 2000) -> str:
-    try:
-        import trafilatura  # type: ignore
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            text = trafilatura.extract(downloaded)
-            if text:
-                return text[:max_chars]
-    except Exception:
-        pass
-    return ""
-
-
-def GoogleSearch(query: str) -> str:
-    global _last_search_time
-    try:
-        from duckduckgo_search import DDGS  # type: ignore
-
-        hits = []
-        for attempt in range(2):
-            elapsed = time.time() - _last_search_time
-            if elapsed < _MIN_SEARCH_DELAY:
-                time.sleep(_MIN_SEARCH_DELAY - elapsed)
-            _last_search_time = time.time()
-
-            with DDGS() as ddgs:
-                hits = list(ddgs.text(query, max_results=5))
-            if hits:
-                break
-            if attempt == 0:
-                time.sleep(_MIN_SEARCH_DELAY)
-
-        if not hits:
-            return "No results found."
-
-        lines = []
-        for h in hits[:3]:  # fetch full content for top 3
-            title   = h.get("title", "")
-            snippet = h.get("body", "")
-            href    = h.get("href", "")
-            content = _fetch_page(href) or snippet
-            lines.append(f"[{title}]\n{href}\n{content}")
-
-        # append remaining results as snippet-only
-        for h in hits[3:]:
-            title   = h.get("title", "")
-            snippet = h.get("body", "")
-            href    = h.get("href", "")
-            lines.append(f"[{title}]\n{href}\n{snippet}")
-
-        return "\n\n".join(lines)
-    except Exception as e:
-        return f"[Search error: {e}]"
-
 
 def Memorize(mem, table: str, args: dict):
     query    = args.get("query", "")
@@ -245,9 +169,9 @@ def _Dispatch(mem, table: str, name: str, args: dict | None = None) -> str:
         mem.addConv(table, "assistant", "[Thought to self]: " + args["message"])
         return None
 
-    elif name == "sendUser":
+    elif name == "sendMsg":
         # add args to conv
-        mem.addConv(table, "assistant", "[Message to user]: " + args["message"])
+        mem.addConv(table, "assistant", "[I said]: " + args["message"])
         return None
 
     elif name == "memorize":
@@ -256,11 +180,6 @@ def _Dispatch(mem, table: str, name: str, args: dict | None = None) -> str:
 
     elif name == "remember":
         mem.addConv(table, "assistant", Remember(mem, table, args["tag_name"], args["memory"], args.get("desc", "")))
-        return None
-
-    elif name == "GoogleSearch":
-        mem.addConv(table, "assistant", "[My question]: " + args["query"])
-        mem.addConv(table, "assistant", "[Google Reply]: " + GoogleSearch(args["query"]))
         return None
 
     else:

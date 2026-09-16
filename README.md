@@ -5,15 +5,15 @@ find bugs, and wrote most of the README and commit messages.*
 
 *Warning, this code has gone through very few testing as of this point*
 
-A self-contained, portable AI agent with persistent memory. Drop `main.py` and `tools.py` into any project, instantiate `Julien`, and it creates and manages its own SQLite memory database right beside the folder. Multiple independent instances can run in the same process without sharing memory.
+A self-contained, portable AI agent with persistent memory. Drop `main.py`, `tools.py`, and `txt_to_db.py` into any project, instantiate `Julien`, and it creates and manages its own SQLite memory database right beside the folder. Multiple independent instances can run in the same process without sharing memory.
 
 ---
 
 ## How it works
 
-Each `Julien` instance runs an **agentic loop**: on every call to `Msg`, the model receives its system prompt, the full conversation history, and a list of tools. It keeps calling tools — searching the web, reading and writing memory — until it calls `sendUser` (or `done`), which ends the turn. As a safety net, the loop is capped at `Julien.MAX_TURNS` (currently `10`) — on the final turn, tools are taken away entirely so the model is forced to produce a plain-text reply instead of silently running out of turns.
+Each `Julien` instance runs an **agentic loop**: on every call to `Msg`, the model receives its system prompt, the full conversation history, and a list of tools. It keeps calling tools — reading and writing memory — until it calls `sendMsg` (or `done`), which ends the turn. As a safety net, the loop is capped at `Julien.MAX_TURNS` (currently `10`) — on the final turn, tools are taken away entirely so the model is forced to produce a plain-text reply instead of silently running out of turns.
 
-Long-term memory is handled by [LivingMemory](https://github.com/DarkTardigrade/LivingMemory). Conversation turns are stored under the `"conv"` tag. Before every model call, `cleanCov()` checks whether `conv + sys_msg` fits the context budget; if not, it backs the whole conversation up into existing topic tags, then trims `conv` down in stages (keeping the newest 40, then 30, 20, 10, 5, 2, and finally wiping it entirely if nothing else fits) — trying to preserve as much recent context as it can before resorting to a full wipe. Each topic tag is compressed by a local AI model whenever it grows too large.
+Long-term memory is handled by [LivingMemory](https://github.com/DarkTardigrade/LivingMemory). Conversation turns are stored under the `"conv"` tag. Before every model call, `cleanCov()` checks whether `conv + sys_msg + tools_tok` (the fixed token cost of the tool schema list, computed once in `__init__`) fits the context budget; if not, it backs the whole conversation up into existing topic tags, then trims `conv` down in stages (keeping the newest 40, then 30, 20, 10, 5, 2, and finally wiping it entirely if nothing else fits) — trying to preserve as much recent context as it can before resorting to a full wipe. Each topic tag is compressed by a local AI model whenever it grows too large.
 
 ---
 
@@ -21,7 +21,7 @@ Long-term memory is handled by [LivingMemory](https://github.com/DarkTardigrade/
 
 - Python 3.9+
 - [Ollama](https://ollama.com) running locally with your chosen model pulled
-- [LivingMemory](https://github.com/DarkTardigrade/LivingMemory) — declared as a pinned git dependency in `pyproject.toml`, along with the other Python dependencies (`ollama`, `rich`, `duckduckgo-search`, `trafilatura`).
+- [LivingMemory](https://github.com/DarkTardigrade/LivingMemory) — declared as a pinned git dependency in `pyproject.toml`, along with the other Python dependencies (`ollama`, `rich`).
 
 ```bash
 pip install -e .
@@ -109,7 +109,7 @@ autoTags=[
 
 #### `Msg(user_msg: str) -> str`
 
-Send a message and get a response. Runs the full agentic loop — tool calls, memory reads, and web searches happen internally. Returns the final reply as a plain string, or `""` if the model never produced one (including on the forced final turn).
+Send a message and get a response. Runs the full agentic loop — tool calls and memory reads happen internally. Returns the final reply as a plain string, or `""` if the model never produced one (including on the forced final turn).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -127,18 +127,46 @@ If the process is hard-killed, the current conversation stays in the `"conv"` ta
 
 ---
 
+#### `makeDBfromTXT(sources: list, tags: dict, table: str = "Julien", chunkSize: int = 10_000) -> None`
+
+Distills plain-text source files into memory tags, using the model and context window already configured on this instance. Delegates to `compileTXT()` in `txt_to_db.py`.
+
+**Destructive** — this wipes and rebuilds every tag in `table` (except `sys_msg`) on **this instance's own database** before repopulating it from `sources`. To seed memory without touching your live DB, call this on a throwaway `Julien` pointed at a different `DB_PATH`, then use `combineDB()` to merge the result into your real one.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sources` | `list[str]` | *required* | Paths to text files (relative to `txt_to_db.py`, or absolute) to distill |
+| `tags` | `dict` | *required* | `{tag_name: description}` — each tag is rebuilt by filtering all source text through its description |
+| `table` | `str` | `"Julien"` | Table to wipe and rebuild |
+| `chunkSize` | `int` | `10_000` | Characters of source text fed to the model per distillation call |
+
+---
+
+#### `combineDB(srcPath: str, srcTable: str, dstPath: str, dstTable: str, model: str = None) -> None`
+
+Merges every tag (except `conv`/`sys_msg`) from `srcTable` into `dstTable` — across the same DB file or two different ones. Unlike `makeDBfromTXT`, this never wipes anything: each tag's content is appended into the destination via `writeMem`, then `cleanTag` folds the merged rows back into one entry so overlapping content gets compressed rather than piling up as duplicates.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `srcPath` | `str` | *required* | DB file to read tags from |
+| `srcTable` | `str` | *required* | Table to read tags from |
+| `dstPath` | `str` | *required* | DB file to merge into |
+| `dstTable` | `str` | *required* | Table to merge into |
+| `model` | `str` | `None` (falls back to `self.model`) | Model used to compress merged tags via `cleanTag` |
+
+---
+
 ## Tools
 
-These are the tools available to Julien during the agentic loop. They are defined in `tools.py`. None of their results are returned to the caller — they're written straight into the conversation so Julien can see and act on them, but only `sendUser` (or the forced final-turn reply, or an unrecoverable error) actually produces the string `Msg` returns.
+These are the tools available to Julien during the agentic loop. They are defined in `tools.py`. None of their results are returned to the caller — they're written straight into the conversation so Julien can see and act on them, but only `sendMsg` (or the forced final-turn reply, or an unrecoverable error) actually produces the string `Msg` returns.
 
 | Tool | Description |
 |------|-------------|
-| `sendUser` | Sends the final reply to the user and ends the turn. |
+| `sendMsg` | Sends the final reply to the user and ends the turn. |
 | `done` | Ends the turn with no reply, when nothing more needs to be said. |
 | `think` | Writes a private thought straight into the conversation — visible to Julien next turn, never shown to the user. |
 | `memorize` | Reads long-term memory. Call without `category` to browse tag names, then again with `category` to read one. |
 | `remember` | Writes new information into a memory category. If `tag_name` matches an existing category, it's added there; if not, a new category is created on the spot using `desc`. |
-| `GoogleSearch` | DuckDuckGo search. Rate-limited to one request per 2 seconds, shared across all instances. Fetches full page content for the top 3 results. |
 
 ### Adding a new tool
 
@@ -147,7 +175,7 @@ Two additions to `tools.py` are required:
 1. A schema entry in the `tools` list (sent to the model)
 2. A backend function and a corresponding `elif` branch in `_Dispatch`
 
-`_Dispatch` signature: `_Dispatch(mem, table, name, args=None)`. It returns `None` for a tool that succeeded (any result is already written into `conv` inside the branch itself), or a string for a genuinely unrecognized tool name. `main.py`'s `_runTool()` is what actually decides whether a turn stops — it checks `name` directly for `"sendUser"`/`"done"`, and also catches any exception `_Dispatch` raises (e.g. missing/malformed args) and treats that as a stop too, surfacing the error text as the turn's output instead of crashing or retrying silently.
+`_Dispatch` signature: `_Dispatch(mem, table, name, args=None)`. It returns `None` for a tool that succeeded (any result is already written into `conv` inside the branch itself), or a string for a genuinely unrecognized tool name. `main.py`'s `_runTool()` is what actually decides whether a turn stops — it checks `name` directly for `"sendMsg"`/`"done"`, and also catches any exception `_Dispatch` raises (e.g. missing/malformed args) and treats that as a stop too, surfacing the error text as the turn's output instead of crashing or retrying silently.
 
 ---
 
@@ -201,9 +229,10 @@ Julien(julienModel="qwen3-big", contextWindow=131072)
 - **Text-parsed tool calls** — `qwen3:14b` sometimes writes tool calls as plain JSON in the content field instead of using Ollama's structured `tool_calls`. `_parseTextToolCall()` catches these by scanning for `{"name": ..., "arguments": ...}` using brace-depth tracking.
 - **`<think>` blocks** — `qwen3:14b` outputs `<think>...</think>` chain-of-thought blocks as part of its content. These appear in `Raw content` debug logs and are normal.
 - **History rebuilt each turn** — conversation history is fetched from the database on every loop iteration. There is no in-memory message list.
-- **No separate "thinking" tag** — tool results, thoughts, and search replies all go straight into `conv`, which is what makes them visible to Julien on the next turn.
+- **No separate "thinking" tag** — tool results and thoughts all go straight into `conv`, which is what makes them visible to Julien on the next turn.
 - **Turn cap with a forced reply** — `Msg` calls `_Brain()` up to `MAX_TURNS` times; on the last one, tools are withheld so the model must answer in plain text rather than exhausting the loop with nothing to show for it.
 - **`sys_msg` always rewritten** — the system prompt is deleted and rewritten from the constructor argument on every startup, so prompt edits take effect immediately without clearing the database.
+- **Tool schema token cost is prebudgeted** — the tool list sent with every non-final-turn request has a fixed token cost, computed once as `self.tools_tok` in `__init__` and folded into every budget check in `cleanCov()`, so trimming accounts for the full request size rather than just `conv + sys_msg`.
 - **LivingMemory version is pinned, not auto-updated** — `pyproject.toml` pins an exact LivingMemory tag, and `main.py` checks the installed version against `MIN_LIVINGMEMORY_VERSION` at import time, raising a clear `ImportError` (with an upgrade command) if it's too old. To move to a newer LivingMemory, bump both the pin and `MIN_LIVINGMEMORY_VERSION` together, then `pip install --upgrade -e .`.
 - **Multiple instances** — each instance gets its own `DB_PATH` and `self.TABLE = "Julien"`. Two instances sharing the same `DB_PATH` would share the same table and corrupt each other's memory; use distinct paths.
 
