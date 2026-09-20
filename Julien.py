@@ -2,6 +2,7 @@
 import os
 import json
 import logging
+from typing import Callable
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 
@@ -45,8 +46,7 @@ from txt_to_db import _compileTXT # type:ignore
 
 class Julien:
     def __init__(self, 
-        julienModel:str,
-        memModel:str = None,
+        model:str,
         contextWindow:int = 2048,
 
         DB_PATH:str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "JulienMemory.db"),
@@ -60,14 +60,15 @@ as well as improving your own understanding of the world.
 If you hear anything you think will be important to know later, use memorize to store it —
 pick an existing category, or write to a new one to create it on the fly.""",
         
-        autoTags:list = []):
+        autoTags:list = [],
+
+        extra_tools:list = [],
+        extra_dispatch:Callable = None):
 
 
 
         # init LivingMem
-        if memModel == None:
-            memModel = julienModel
-        self.mem = LivingMemory(model=memModel, timeout=timeout, dbPath=DB_PATH)
+        self.mem = LivingMemory(model=model, timeout=timeout, dbPath=DB_PATH)
         self.TABLE = "Julien"
         self.mem.deleteTag(self.TABLE, "sys_msg")
         self.mem.writeMem(self.TABLE, "sys_msg", memory=sys_msg)
@@ -86,12 +87,20 @@ pick an existing category, or write to a new one to create it on the fly.""",
                 self.mem.writeMem(self.TABLE, tag_name, desc=tag_desc)
 
         # Julien personal data
-        self.model = julienModel
+        self.model = model
         self.contextWindow = contextWindow
         self.MAX_TURNS = MAX_TURNS
 
+        # merge extra_tools into the built-in schema list. same name overrides the built-in entry
+        self.extra_dispatch = extra_dispatch
+        self._extra_names = {t["function"]["name"] for t in extra_tools}
+        merged = {t["function"]["name"]: t for t in tools}
+        for t in extra_tools:
+            merged[t["function"]["name"]] = t
+        self.tools = list(merged.values())
+
         # tool schemas are sent with every non-final turn - compute token cost
-        self.tools_tok = self.mem._strTok(json.dumps(tools), self.model)
+        self.tools_tok = self.mem._strTok(json.dumps(self.tools), self.model)
 
         # check sys_msg size against context budget
         sys_tok = self.mem.memTok(self.TABLE, tag="sys_msg", model=self.model)
@@ -106,7 +115,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
 
 
     # gets a reply from Julien baced on text input
-    def Msg(self, user_msg: str) -> str:
+    def msg(self, user_msg: str) -> str:
 
 
         # add user's last message to the conversation
@@ -115,7 +124,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
         responce = None
         for turn in range(self.MAX_TURNS):
             last_turn = (turn == self.MAX_TURNS - 1)
-            responce = self._Brain(force_reply=last_turn)
+            responce = self._brain(force_reply=last_turn)
             if responce is not None:
                 break
 
@@ -123,7 +132,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
 
 
 
-    def _Brain(self, force_reply: bool = False) -> str | None:
+    def _brain(self, force_reply: bool = False) -> str | None:
 
         # make sure everything fits in context window
         self.cleanCov()
@@ -134,7 +143,7 @@ pick an existing category, or write to a new one to create it on the fly.""",
         messages = [{"role": "system", "content": sys_content}] + history
 
         # on the last turn, take tools away so Julien is forced to reply in plain text
-        turn_tools = None if force_reply else tools
+        turn_tools = None if force_reply else self.tools
 
         # run the AI
         response = self.mem.useAI(messages, turn_tools, self.model)
@@ -221,7 +230,10 @@ pick an existing category, or write to a new one to create it on the fly.""",
 
     def _runTool(self, name: str, args: dict) -> str | None:
         try:
-            result = _Dispatch(self.mem, self.TABLE, name, args)
+            if name in self._extra_names and self.extra_dispatch:
+                result = self.extra_dispatch(self.mem, self.TABLE, name, args)
+            else:
+                result = _Dispatch(self.mem, self.TABLE, name, args)
             if name == "sendMsg":
                 return args["message"]
             if name == "done":

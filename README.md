@@ -11,7 +11,7 @@ A self-contained, portable AI agent with persistent memory. Drop `Julien.py`, `t
 
 ## How it works
 
-Each `Julien` instance runs an **agentic loop**: on every call to `Msg`, the model receives its system prompt, the full conversation history, and a list of tools. It keeps calling tools — reading and writing memory — until it calls `sendMsg` (or `done`), which ends the turn. As a safety net, the loop is capped at `Julien.MAX_TURNS` (currently `10`) — on the final turn, tools are taken away entirely so the model is forced to produce a plain-text reply instead of silently running out of turns.
+Each `Julien` instance runs an **agentic loop**: on every call to `msg`, the model receives its system prompt, the full conversation history, and a list of tools. It keeps calling tools — reading and writing memory — until it calls `sendMsg` (or `done`), which ends the turn. As a safety net, the loop is capped at `Julien.MAX_TURNS` (currently `10`) — on the final turn, tools are taken away entirely so the model is forced to produce a plain-text reply instead of silently running out of turns.
 
 Long-term memory is handled by [LivingMemory](https://github.com/DarkTardigrade/LivingMemory). Conversation turns are stored under the `"conv"` tag. Before every model call, `cleanCov()` checks whether `conv + sys_msg + tools_tok` (the fixed token cost of the tool schema list, computed once in `__init__`) fits the context budget; if not, it backs the whole conversation up into existing topic tags, then trims `conv` down in stages (keeping the newest 40, then 30, 20, 10, 5, 2, and finally wiping it entirely if nothing else fits) — trying to preserve as much recent context as it can before resorting to a full wipe. Each topic tag is compressed by a local AI model whenever it grows too large.
 
@@ -48,8 +48,8 @@ pip install .
 ```python
 from Julien import Julien
 
-j = Julien(julienModel="qwen3:14b")
-response = j.Msg("Hello!")
+j = Julien(model="qwen3:14b")
+response = j.msg("Hello!")
 print(response)
 
 j.saveMem()  # flush conversation to long-term memory on exit
@@ -63,25 +63,29 @@ j.saveMem()  # flush conversation to long-term memory on exit
 
 ```python
 Julien(
-    julienModel   = "qwen3:14b",   # required — no default
-    memModel      = None,          # falls back to julienModel if omitted
-    contextWindow = 2048,
-    DB_PATH       = "<beside Julien.py>/JulienMemory.db",
-    timeout       = 180,
-    sys_msg       = "...",
-    autoTags      = [],
+    model          = "qwen3:14b",   # required — no default
+    contextWindow  = 2048,
+    DB_PATH        = "<beside Julien.py>/JulienMemory.db",
+    timeout        = 180,
+    MAX_TURNS      = 10,
+    sys_msg        = "...",
+    autoTags       = [],
+    extra_tools    = [],
+    extra_dispatch = None,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `julienModel` | `str` | *required* | Model used for conversation |
-| `memModel` | `str` | `None` (falls back to `julienModel`) | Model used for memory compression |
+| `model` | `str` | *required* | Model used for both conversation and memory compression — there is no separate memory model |
 | `contextWindow` | `int` | `2048` | Token budget — must match the `num_ctx` Ollama is using |
 | `DB_PATH` | `str` | beside `Julien.py` | Path to the SQLite memory database |
 | `timeout` | `int` | `180` | Ollama client timeout in seconds |
+| `MAX_TURNS` | `int` | `10` | Safety cap on the agentic loop per `msg()` call — tools are withheld on the final turn to force a plain-text reply |
 | `sys_msg` | `str` | built-in prompt | Julien's system prompt |
 | `autoTags` | `list` | `[]` | Memory categories to create on first run (safe to include every startup) |
+| `extra_tools` | `list` | `[]` | Extra tool schemas to merge in alongside the built-ins — see [Adding tools from your own project](#adding-tools-from-your-own-project) |
+| `extra_dispatch` | `Callable` | `None` | Handler for the tools listed in `extra_tools` — see [Adding tools from your own project](#adding-tools-from-your-own-project) |
 
 **`contextWindow`** controls when conversation history is flushed to long-term memory. It must match the `num_ctx` value Ollama is actually using, otherwise the budget math will be wrong.
 
@@ -107,7 +111,7 @@ autoTags=[
 
 ### Public methods
 
-#### `Msg(user_msg: str) -> str`
+#### `msg(user_msg: str) -> str`
 
 Send a message and get a response. Runs the full agentic loop — tool calls and memory reads happen internally. Returns the final reply as a plain string, or `""` if the model never produced one (including on the forced final turn).
 
@@ -158,7 +162,7 @@ Merges every tag (except `conv`/`sys_msg`) from `srcTable` into `dstTable` — a
 
 ## Tools
 
-These are the tools available to Julien during the agentic loop. They are defined in `tools.py`. None of their results are returned to the caller — they're written straight into the conversation so Julien can see and act on them, but only `sendMsg` (or the forced final-turn reply, or an unrecoverable error) actually produces the string `Msg` returns.
+These are the tools available to Julien during the agentic loop. They are defined in `tools.py`. None of their results are returned to the caller — they're written straight into the conversation so Julien can see and act on them, but only `sendMsg` (or the forced final-turn reply, or an unrecoverable error) actually produces the string `msg` returns.
 
 | Tool | Description |
 |------|-------------|
@@ -176,6 +180,43 @@ Two additions to `tools.py` are required:
 2. A backend function and a corresponding `elif` branch in `_Dispatch`
 
 `_Dispatch` signature: `_Dispatch(mem, table, name, args=None)`. It returns `None` for a tool that succeeded (any result is already written into `conv` inside the branch itself), or a string for a genuinely unrecognized tool name. `Julien.py`'s `_runTool()` is what actually decides whether a turn stops — it checks `name` directly for `"sendMsg"`/`"done"`, and also catches any exception `_Dispatch` raises (e.g. missing/malformed args) and treats that as a stop too, surfacing the error text as the turn's output instead of crashing or retrying silently.
+
+Use this route when you're contributing a tool to Julien_lite itself. If you're building on top of it as a library, see below.
+
+### Adding tools from your own project
+
+You don't need to fork or edit `tools.py` to give a `Julien` instance project-specific tools — pass `extra_tools` and `extra_dispatch` to the constructor instead:
+
+```python
+from Julien import Julien
+
+def my_dispatch(mem, table, name, args):
+    if name == "get_weather":
+        return call_weather_api(args["city"])
+    return f"[unknown tool: {name}]"
+
+my_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Fetch current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string", "description": "City name"}},
+                "required": ["city"]
+            }
+        }
+    }
+]
+
+j = Julien(model="qwen3:14b", extra_tools=my_tools, extra_dispatch=my_dispatch)
+```
+
+- `extra_tools` is a list of schema dicts in the same shape as the built-in `tools` list. Entries are merged in by `function.name` — a schema using the same name as a built-in tool (e.g. `sendMsg`) **replaces** it, which is also how you override an existing tool's behavior without touching `tools.py`.
+- `extra_dispatch(mem, table, name, args)` is called for any tool name that came from `extra_tools`; every other tool still goes through the built-in `_Dispatch`. It follows the same contract as `_Dispatch` — return `None` if the result was already written into `conv` yourself, or a string to have it written for you.
+- `sendMsg`/`done` stop the turn the same way no matter which dispatcher handled them, since `_runTool()` checks the tool *name*, not which function ran it — so overriding either one still works correctly.
+- This is scoped per instance, not global — separate `Julien` instances in the same process can be handed completely different toolsets.
 
 ---
 
@@ -219,7 +260,7 @@ ollama serve  # start with OLLAMA_CONTEXT_LENGTH=131072
 Then instantiate with:
 
 ```python
-Julien(julienModel="qwen3-big", contextWindow=131072)
+Julien(model="qwen3-big", contextWindow=131072)
 ```
 
 ---
@@ -230,9 +271,9 @@ Julien(julienModel="qwen3-big", contextWindow=131072)
 - **`<think>` blocks** — `qwen3:14b` outputs `<think>...</think>` chain-of-thought blocks as part of its content. These appear in `Raw content` debug logs and are normal.
 - **History rebuilt each turn** — conversation history is fetched from the database on every loop iteration. There is no in-memory message list.
 - **No separate "thinking" tag** — tool results and thoughts all go straight into `conv`, which is what makes them visible to Julien on the next turn.
-- **Turn cap with a forced reply** — `Msg` calls `_Brain()` up to `MAX_TURNS` times; on the last one, tools are withheld so the model must answer in plain text rather than exhausting the loop with nothing to show for it.
+- **Turn cap with a forced reply** — `msg()` calls `_brain()` up to `MAX_TURNS` times; on the last one, tools are withheld so the model must answer in plain text rather than exhausting the loop with nothing to show for it.
 - **`sys_msg` always rewritten** — the system prompt is deleted and rewritten from the constructor argument on every startup, so prompt edits take effect immediately without clearing the database.
-- **Tool schema token cost is prebudgeted** — the tool list sent with every non-final-turn request has a fixed token cost, computed once as `self.tools_tok` in `__init__` and folded into every budget check in `cleanCov()`, so trimming accounts for the full request size rather than just `conv + sys_msg`.
+- **Tool schema token cost is prebudgeted** — the tool list sent with every non-final-turn request (built-ins plus any `extra_tools`) has a fixed token cost, computed once as `self.tools_tok` in `__init__` and folded into every budget check in `cleanCov()`, so trimming accounts for the full request size rather than just `conv + sys_msg`.
 - **LivingMemory version is pinned, not auto-updated** — `pyproject.toml` pins an exact LivingMemory tag, and `Julien.py` checks the installed version against `MIN_LIVINGMEMORY_VERSION` at import time, raising a clear `ImportError` (with an upgrade command) if it's too old. To move to a newer LivingMemory, bump both the pin and `MIN_LIVINGMEMORY_VERSION` together, then `pip install --upgrade -e .`.
 - **Multiple instances** — each instance gets its own `DB_PATH` and `self.TABLE = "Julien"`. Two instances sharing the same `DB_PATH` would share the same table and corrupt each other's memory; use distinct paths.
 
